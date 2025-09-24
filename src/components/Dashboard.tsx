@@ -10,34 +10,88 @@ interface Balance {
   balance: number;
 }
 
+interface Transactions {
+  tx_hash: string;
+  block_signed_at: string;
+  token_symbol: string;
+  value: number;
+}
+
 function DashboardContent() {
   const { login, logout, authenticated } = usePrivy();
   const { wallets } = useWallets();
   const walletAddress = wallets?.[0]?.address || "";
 
   const [balances, setBalances] = useState<Balance[]>([]);
-  const [txs, setTxs] = useState<any[]>([]);
+  const [txs, setTxs] = useState<Transactions[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!walletAddress) return;
     setLoading(true);
 
-    const chainId = process.env.NEXT_PUBLIC_SONIC_CHAIN_ID;
+    const chainId = process.env.NEXT_PUBLIC_SONIC_CHAIN_ID || "14601";
     const apiKey = process.env.NEXT_PUBLIC_COVALENT_API_KEY;
+    const rpcUrl =
+      process.env.NEXT_PUBLIC_SONIC_RPC_URL || "https://rpc.soniclabs.com";
 
     const balancesUrl = `https://api.covalenthq.com/v1/${chainId}/address/${walletAddress}/balances_v2/?key=${apiKey}`;
     const txsUrl = `https://api.covalenthq.com/v1/${chainId}/address/${walletAddress}/transactions_v3/?key=${apiKey}`;
 
-    Promise.all([
-      fetch(balancesUrl).then((r) => r.json()),
-      fetch(txsUrl).then((r) => r.json()),
-    ])
-      .then(([balancesRes, txsRes]) => {
-        setBalances(balancesRes.data?.items || []);
+    async function fetchData() {
+      try {
+        const [balancesRes, txsRes] = await Promise.all([
+          fetch(balancesUrl).then((r) => r.json()),
+          fetch(txsUrl).then((r) => r.json()),
+        ]);
+
+        let balancesData = balancesRes.data?.items || [];
+
+        // 👇 Check if Covalent returned zero SONIC, then fallback to RPC
+        const sonicToken = balancesData.find(
+          (b: Balance) => b.contract_ticker_symbol === "S"
+        );
+        if (!sonicToken || parseFloat(sonicToken.balance) === 0) {
+          console.warn("Covalent returned 0 balance, falling back to RPC...");
+          try {
+            const rpcRes = await fetch(rpcUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                method: "eth_getBalance",
+                params: [walletAddress, "latest"],
+                id: 1,
+              }),
+            }).then((r) => r.json());
+
+            const balanceHex = rpcRes?.result || "0x0";
+            const balance = parseInt(balanceHex, 16) / 1e18;
+            console.log("RPC balance:", balance);
+
+            balancesData = [
+              {
+                contract_address: "0x0000000000000000000000000000000000000000",
+                contract_ticker_symbol: "S",
+                contract_decimals: 18,
+                balance: String(balance * 1e18),
+              },
+            ];
+          } catch (err) {
+            console.error("RPC fallback failed:", err);
+          }
+        }
+
+        setBalances(balancesData);
         setTxs(txsRes.data?.items || []);
-      })
-      .finally(() => setLoading(false));
+      } catch (err) {
+        console.error("Error fetching balances/txs:", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchData();
   }, [walletAddress]);
 
   return (
@@ -95,17 +149,25 @@ function DashboardContent() {
               )}
               {!loading && balances.length > 0 && (
                 <ul className="space-y-1">
-                  {balances.map((bal) => (
-                    <li
-                      key={bal.contract_address}
-                      className="flex justify-between text-gray-300"
-                    >
-                      <span>{bal.contract_ticker_symbol}</span>
-                      <span>
-                        {(bal.balance / 10 ** bal.contract_decimals).toFixed(4)}
-                      </span>
-                    </li>
-                  ))}
+                  {balances.map((bal) => {
+                    // Covalent returns balance as string in base units
+                    const rawBalance =
+                      typeof bal.balance === "string"
+                        ? bal.balance
+                        : String(bal.balance);
+                    const displayBalance =
+                      parseFloat(rawBalance) /
+                      Math.pow(10, bal.contract_decimals);
+                    return (
+                      <li
+                        key={bal.contract_address}
+                        className="flex justify-between text-gray-300"
+                      >
+                        <span>{bal.contract_ticker_symbol}</span>
+                        <span>{displayBalance.toFixed(5)}</span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
